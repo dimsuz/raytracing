@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE StrictData #-}
 module Main where
 
@@ -6,10 +7,10 @@ import System.IO (hPutStr, stderr)
 import Data.List.Index (imapM_)
 import Control.Monad (when)
 import Linear.V3
-import Linear.Metric (normalize)
+import Linear.Metric (norm, normalize, dot)
 
-imageWidth = 600
-imageHeight = 300
+imageWidth = 1000
+imageHeight = 500
 
 data Ray = Ray
   { rayOrigin :: V3 Double
@@ -20,10 +21,23 @@ rayAt :: Ray -> Double -> V3 Double
 rayAt r t = rayOrigin r + pure t * rayDirection r
 
 rayColor :: Ray -> V3 Double
-rayColor r = let
-  (V3 _ y _) = normalize $ rayDirection r
-  t = 0.5 * (y  + 1.0)
-  in pure (1.0 - t) * V3 1.0 1.0 1.0 + pure t * V3 0.5 0.7 1.0
+rayColor r = case hitSphere (V3 0.0 0.0 (-1.0)) 0.5 r of
+  Just t -> let
+    n = normalize (rayAt r t - V3 0.0 0.0 (-1.0))
+    in pure 0.5 * (pure 1.0 + n)
+  Nothing -> let
+    (V3 _ y _) = normalize $ rayDirection r
+    t = 0.5 * (y + 1.0)
+    in pure (1.0 - t) * V3 1.0 1.0 1.0 + pure t * V3 0.5 0.7 1.0
+
+hitSphere :: V3 Double -> Double -> Ray -> Maybe Double
+hitSphere center radius Ray{..} = let
+  oc = rayOrigin - center
+  a = norm rayDirection ^ 2
+  half_b = dot oc rayDirection
+  c = norm oc ^ 2 - radius ^ 2
+  discriminant = half_b ^ 2 - a * c
+  in if discriminant >= 0 then Just ((-half_b) - sqrt discriminant / a) else Nothing
 
 output :: [V3 Double] -> Int -> Int -> IO ()
 output image w h = do
@@ -49,7 +63,6 @@ backgroundRay (i,j) = let
   in Ray { rayOrigin = origin
          , rayDirection = lowerLeftCorner + pure u * horizontal + pure v * vertical
          }
-
 main :: IO ()
 main = do
   let pxs = [(i, j) | j <- [imageHeight-1, imageHeight-2 .. 0], i <- [0..imageWidth-1]]
