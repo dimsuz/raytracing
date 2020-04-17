@@ -20,3 +20,5 @@ executable raytracing
   build-depends:       base >= 4.7 && < 5
                      , ilist
                      , linear
+                     , random
+                     , mtl

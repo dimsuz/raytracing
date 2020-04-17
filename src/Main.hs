@@ -9,11 +9,13 @@ import Control.Monad (when)
 import Linear.V3
 import Linear.Metric (norm, normalize, dot)
 import Control.Applicative ((<|>))
-import Data.Semigroup
+import Control.Monad.State
+import System.Random
 import Debug.Trace
 
-imageWidth = 1000
-imageHeight = 500
+imageWidth = 200
+imageHeight = 100
+samplesPerPixel = 100
 
 maxNonInfiniteFloat :: RealFloat a => a -> a
 maxNonInfiniteFloat a = encodeFloat m n where
@@ -24,6 +26,19 @@ maxNonInfiniteFloat a = encodeFloat m n where
     n = e' - e
 
 infinity = maxNonInfiniteFloat 1
+
+clamp :: Double -> Double -> Double -> Double
+clamp x min max
+  | x < min = min
+  | x > max = max
+  | otherwise = x
+
+data Camera = Camera
+  { cameraLowerLeftCorner :: V3 Double
+  , cameraHorizontal :: V3 Double
+  , cameraVertical :: V3 Double
+  , cameraOrigin :: V3 Double
+  }
 
 data Ray = Ray
   { rayOrigin :: V3 Double
@@ -74,6 +89,12 @@ instance Hittable a => Hittable [a] where
 rayAt :: Ray -> Double -> V3 Double
 rayAt r t = rayOrigin r + pure t * rayDirection r
 
+mkRay :: Camera -> Double -> Double -> Ray
+mkRay Camera{..} u v = Ray
+  { rayOrigin = cameraOrigin
+  , rayDirection = cameraLowerLeftCorner + pure u * cameraHorizontal + pure v * cameraVertical - cameraOrigin
+  }
+
 rayColor :: Hittable h => h -> Ray -> V3 Double
 rayColor h r = case hit h r 0 infinity of
   Just HitRecord{..} -> pure 0.5 * (pure 1.0 + hitNormal)
@@ -85,32 +106,46 @@ rayColor h r = case hit h r 0 infinity of
 output :: [V3 Double] -> Int -> Int -> IO ()
 output image w h = do
   putStrLn $ "P3\n" <> show w <> " " <> show h <> "\n255"
-  let colors = map (\px -> truncate <$> pure 255.999 * px) image
+  let colors = map (sampledOutputColor samplesPerPixel) image
   imapM_ (\idx (V3 ir ig ib) -> do
              printScanLineDebug w h idx
              putStrLn $ show ir <> " " <> show ig <> " " <> show ib
          ) colors
 
+sampledOutputColor :: Int -> V3 Double -> V3 Int
+sampledOutputColor samplesPerPixel rgb = let
+  scale = 1.0 / fromIntegral samplesPerPixel
+  (V3 r g b) = pure scale * rgb
+  in truncate <$> pure 256 * V3 (clamp r 0.0 0.999) (clamp g 0.0 0.999) (clamp b 0.0 0.999)
+
 printScanLineDebug :: Int -> Int -> Int -> IO ()
 printScanLineDebug w h index = when (index `mod` w == 0) $
   hPutStr stderr $ "Scanlines remaining " <> show (h - (index `div` w)) <> "\r"
 
-backgroundRay :: (Int, Int) -> Ray
-backgroundRay (i,j) = let
-  lowerLeftCorner = V3 (-2.0) (-1.0) (-1.0)
-  horizontal = V3 4.0 0.0 0.0
-  vertical = V3 0.0 2.0 0.0
-  origin = V3 0.0 0.0 0.0
-  u = fromIntegral i / fromIntegral imageWidth
-  v = fromIntegral j / fromIntegral imageHeight
-  in Ray { rayOrigin = origin
-         , rayDirection = lowerLeftCorner + pure u * horizontal + pure v * vertical
-         }
+-- TODO figure out a better name, it's not background ray!
+backgroundRay :: StdGen -> Camera -> (Int, Int) -> [Ray]
+backgroundRay gen camera (i,j) = let
+  rus :: [Double]
+  rus = take samplesPerPixel $ randoms gen
+  rvs :: [Double]
+  rvs = take samplesPerPixel $ randoms gen
+  us = map (\ru -> ru + fromIntegral i / fromIntegral imageWidth) rus
+  vs = map (\rv -> rv + fromIntegral j / fromIntegral imageHeight) rvs
+  in zipWith (mkRay camera) us vs
+
+buildColor :: Hittable h => h -> [Ray] -> V3 Double
+buildColor h rs = sum $ map (rayColor h) rs
+
+camera = Camera { cameraLowerLeftCorner = V3 (-2.0) (-1.0) (-1.0)
+                  , cameraHorizontal = V3 4.0 0.0 0.0
+                  , cameraVertical = V3 0.0 2.0 0.0
+                  , cameraOrigin = V3 0.0 0.0 0.0
+                  }
 
 main :: IO ()
 main = do
+  gen <- getStdGen
   let pxs = [(i, j) | j <- [imageHeight-1, imageHeight-2 .. 0], i <- [0..imageWidth-1]]
-      rays = map backgroundRay pxs
-      world = Sphere (V3 0.0 0.0 (-1.0)) 0.5
-      colors = map (rayColor world) rays
+      world = [Sphere (V3 0.0 0.0 (-1.0)) 0.5, Sphere (V3 0.0 (-100.5) (-1.0)) 100]
+      colors = map (buildColor world . backgroundRay gen camera) pxs
   output colors imageWidth imageHeight
