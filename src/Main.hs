@@ -6,16 +6,17 @@ module Main where
 import System.IO (hPutStr, stderr)
 import Data.List.Index (imapM_)
 import Control.Monad (when)
+import Control.Monad.Loops (iterateWhile)
 import Linear.V3
 import Linear.Metric (norm, normalize, dot)
 import Control.Applicative ((<|>))
 import Control.Monad.State
 import System.Random
-import Debug.Trace
 
-imageWidth = 500
-imageHeight = 250
+imageWidth = 200
+imageHeight = 100
 samplesPerPixel = 100
+maxDepth = 50
 
 maxNonInfiniteFloat :: RealFloat a => a -> a
 maxNonInfiniteFloat a = encodeFloat m n where
@@ -95,13 +96,32 @@ mkRay Camera{..} u v = Ray
   , rayDirection = cameraLowerLeftCorner + pure u * cameraHorizontal + pure v * cameraVertical - cameraOrigin
   }
 
-rayColor :: Hittable h => h -> Ray -> V3 Double
-rayColor h r = case hit h r 0 infinity of
-  Just HitRecord{..} -> pure 0.5 * (pure 1.0 + hitNormal)
-  Nothing -> let
-    (V3 _ y _) = normalize $ rayDirection r
-    t = 0.5 * (y + 1.0)
-    in pure (1.0 - t) * V3 1.0 1.0 1.0 + pure t * V3 0.5 0.7 1.0
+randomInUnitSphere :: State StdGen (V3 Double)
+randomInUnitSphere = iterateWhile (\v -> norm v ^ 2 >= 1) $ randomR' (-1.0, 1.0)
+
+rayColor :: Hittable h => h -> Ray -> State (StdGen, Int) (V3 Double)
+rayColor h r = do
+  depth <- gets snd
+  if depth <= 0
+    then return (V3 0.0 0.0 0.0)
+    else case hit h r 0.00001 infinity of
+      Just hrec -> rayHitColor h hrec
+      Nothing -> return $ backgroundColor r
+
+rayHitColor :: Hittable h => h -> HitRecord -> State (StdGen, Int) (V3 Double)
+rayHitColor h HitRecord{..} = do
+  (g, depth) <- get
+  let (ru,newg) = runState randomInUnitSphere g
+  put (newg, depth - 1)
+  let target = hitP + hitNormal + ru
+  color <- rayColor h (Ray { rayOrigin = hitP, rayDirection = target - hitP })
+  return $ pure 0.5 * color
+
+backgroundColor :: Ray -> V3 Double
+backgroundColor r = let
+        (V3 _ y _) = normalize $ rayDirection r
+        t = 0.5 * (y + 1.0)
+        in pure (1.0 - t) * V3 1.0 1.0 1.0 + pure t * V3 0.5 0.7 1.0
 
 output :: [V3 Double] -> Int -> Int -> IO ()
 output image w h = do
@@ -115,17 +135,20 @@ output image w h = do
 sampledOutputColor :: Int -> V3 Double -> V3 Int
 sampledOutputColor samplesPerPixel rgb = let
   scale = 1.0 / fromIntegral samplesPerPixel
-  (V3 r g b) = pure scale * rgb
+  (V3 r g b) = sqrt <$> pure scale * rgb
   in truncate <$> pure 256 * V3 (clamp r 0.0 0.999) (clamp g 0.0 0.999) (clamp b 0.0 0.999)
 
 printScanLineDebug :: Int -> Int -> Int -> IO ()
 printScanLineDebug w h index = when (index `mod` w == 0) $
   hPutStr stderr $ "Scanlines remaining " <> show (h - (index `div` w)) <> "               \r"
 
-random' :: State StdGen Double
+random' :: Random a => State StdGen a
 random' = state random
 
-randoms' :: Int -> State StdGen [Double]
+randomR' :: Random a => (a, a) -> State StdGen a
+randomR' range = state (randomR range)
+
+randoms' :: Random a => Int -> State StdGen [a]
 randoms' n = replicateM n random'
 
 -- TODO figure out a better name, it's not background ray!
@@ -138,8 +161,12 @@ backgroundRay camera (i,j) = do
     vs = map (\rv -> (rv + fromIntegral j) / fromIntegral imageHeight) rvs
   return $ zipWith (mkRay camera) us vs
 
-buildColor :: Hittable h => h -> [Ray] -> V3 Double
-buildColor h rs = sum $ map (rayColor h) rs
+buildColor :: Hittable h => h -> [Ray] -> State StdGen (V3 Double)
+buildColor h rs = do
+  gen <- get
+  let (colors, (newg, _)) = flip runState (gen, maxDepth) $ mapM (rayColor h) rs
+  put newg
+  return (sum colors)
 
 camera = Camera { cameraLowerLeftCorner = V3 (-2.0) (-1.0) (-1.0)
                   , cameraHorizontal = V3 4.0 0.0 0.0
@@ -152,7 +179,6 @@ main = do
   gen <- getStdGen
   let pxs = [(i, j) | j <- [imageHeight-1, imageHeight-2 .. 0], i <- [0..imageWidth-1]]
       world = [Sphere (V3 0.0 0.0 (-1.0)) 0.5, Sphere (V3 0.0 (-100.5) (-1.0)) 100]
-      colors = flip evalState gen $ do
-        rays <- mapM (backgroundRay camera) pxs
-        return $ map (buildColor world) rays
+      (rays, newgen) = flip runState gen $ mapM (backgroundRay camera) pxs
+      colors = flip evalState newgen $ mapM (buildColor world) rays
   output colors imageWidth imageHeight
