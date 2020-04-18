@@ -13,8 +13,8 @@ import Control.Monad.State
 import System.Random
 import Debug.Trace
 
-imageWidth = 200
-imageHeight = 100
+imageWidth = 500
+imageHeight = 250
 samplesPerPixel = 100
 
 maxNonInfiniteFloat :: RealFloat a => a -> a
@@ -120,18 +120,23 @@ sampledOutputColor samplesPerPixel rgb = let
 
 printScanLineDebug :: Int -> Int -> Int -> IO ()
 printScanLineDebug w h index = when (index `mod` w == 0) $
-  hPutStr stderr $ "Scanlines remaining " <> show (h - (index `div` w)) <> "\r"
+  hPutStr stderr $ "Scanlines remaining " <> show (h - (index `div` w)) <> "               \r"
+
+random' :: State StdGen Double
+random' = state random
+
+randoms' :: Int -> State StdGen [Double]
+randoms' n = replicateM n random'
 
 -- TODO figure out a better name, it's not background ray!
-backgroundRay :: StdGen -> Camera -> (Int, Int) -> [Ray]
-backgroundRay gen camera (i,j) = let
-  rus :: [Double]
-  rus = take samplesPerPixel $ randoms gen
-  rvs :: [Double]
-  rvs = take samplesPerPixel $ randoms gen
-  us = map (\ru -> ru + fromIntegral i / fromIntegral imageWidth) rus
-  vs = map (\rv -> rv + fromIntegral j / fromIntegral imageHeight) rvs
-  in zipWith (mkRay camera) us vs
+backgroundRay :: Camera -> (Int, Int) -> State StdGen [Ray]
+backgroundRay camera (i,j) = do
+  rus <- if samplesPerPixel > 1 then randoms' samplesPerPixel else pure [0.0]
+  rvs <- if samplesPerPixel > 1 then randoms' samplesPerPixel else pure [0.0]
+  let
+    us = map (\ru -> (ru + fromIntegral i) / fromIntegral imageWidth) rus
+    vs = map (\rv -> (rv + fromIntegral j) / fromIntegral imageHeight) rvs
+  return $ zipWith (mkRay camera) us vs
 
 buildColor :: Hittable h => h -> [Ray] -> V3 Double
 buildColor h rs = sum $ map (rayColor h) rs
@@ -147,5 +152,7 @@ main = do
   gen <- getStdGen
   let pxs = [(i, j) | j <- [imageHeight-1, imageHeight-2 .. 0], i <- [0..imageWidth-1]]
       world = [Sphere (V3 0.0 0.0 (-1.0)) 0.5, Sphere (V3 0.0 (-100.5) (-1.0)) 100]
-      colors = map (buildColor world . backgroundRay gen camera) pxs
+      colors = flip evalState gen $ do
+        rays <- mapM (backgroundRay camera) pxs
+        return $ map (buildColor world) rays
   output colors imageWidth imageHeight
