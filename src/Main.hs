@@ -13,10 +13,10 @@ import Control.Applicative ((<|>))
 import Control.Monad.State
 import System.Random
 
-imageWidth = 200
-imageHeight = 100
+imageWidth = 400
+imageHeight = 200
 samplesPerPixel = 100
-maxDepth = 50
+maxDepth = 70
 
 maxNonInfiniteFloat :: RealFloat a => a -> a
 maxNonInfiniteFloat a = encodeFloat m n where
@@ -51,14 +51,23 @@ data HitRecord = HitRecord
   , hitT :: Double
   , hitNormal :: V3 Double
   , hitNormalIsFrontFace :: Bool
+  , hitMaterial :: Material
+  }
+
+data MaterialRecord = MaterialRecord
+  { matAttenuation :: V3 Double
+  , matScattered :: Ray
   }
 
 class Hittable a where
   hit :: a -> Ray -> Double -> Double -> Maybe HitRecord
 
+type Material = Ray -> HitRecord -> State StdGen (Maybe MaterialRecord)
+
 data Sphere = Sphere
   { sphereCenter :: V3 Double
   , sphereRadius :: Double
+  , sphereMaterial :: Material
   }
 
 instance Hittable Sphere where
@@ -77,6 +86,7 @@ instance Hittable Sphere where
                outwardNormal = (hitP - sphereCenter) / pure sphereRadius
                hitNormalIsFrontFace = dot rayDirection outwardNormal < 0
                hitNormal = if hitNormalIsFrontFace then outwardNormal else (-outwardNormal)
+               hitMaterial = sphereMaterial
            in Just HitRecord{..}
       else Nothing
     in if discriminant > 0 then testRoot root1 <|> testRoot root2 else Nothing
@@ -86,6 +96,25 @@ instance Hittable a => Hittable [a] where
     where hitTest h lasth closestSoFar = let
             maybeRecord = hit h r tMin closestSoFar <|> lasth
             in (maybe closestSoFar hitT maybeRecord, maybeRecord)
+
+materialLambertian :: V3 Double -> Material
+materialLambertian albedo ray HitRecord{..} = do
+  ruv <- randomUnitVector
+  let scatterDirection = hitNormal + ruv
+      matScattered = Ray { rayOrigin = hitP, rayDirection = scatterDirection }
+      matAttenuation = albedo
+  return $ Just MaterialRecord{..}
+
+materialMetal :: V3 Double -> Double -> Material
+materialMetal albedo fuzz Ray{..} HitRecord{..} = do
+  v <- randomUnitVector
+  let reflect v n = v - pure (2 * dot v n) * n
+      reflected = reflect (normalize rayDirection) hitNormal
+      direction = reflected + pure fuzz' * v
+      fuzz' = if fuzz < 1 then fuzz else 1
+      matScattered = Ray { rayOrigin = hitP, rayDirection = direction }
+      matAttenuation = albedo
+  return $ if dot direction hitNormal > 0 then Just MaterialRecord{..} else Nothing
 
 rayAt :: Ray -> Double -> V3 Double
 rayAt r t = rayOrigin r + pure t * rayDirection r
@@ -97,7 +126,19 @@ mkRay Camera{..} u v = Ray
   }
 
 randomInUnitSphere :: State StdGen (V3 Double)
-randomInUnitSphere = iterateWhile (\v -> norm v ^ 2 >= 1) $ randomR' (-1.0, 1.0)
+randomInUnitSphere = iterateWhile (\v -> norm v ^ 2 >= 1) $ randomR' (-1, 1)
+
+randomUnitVector :: State StdGen (V3 Double)
+randomUnitVector = do
+  a <- randomR' (0.0, 2.0 * pi)
+  z <- randomR' (-1.0, 1.0)
+  let r = sqrt (1.0 - z ^ 2)
+  return $ V3 (r * cos a) (r * sin a) z
+
+randomInHemisphere :: V3 Double -> State StdGen (V3 Double)
+randomInHemisphere normal = do
+  v <- randomInUnitSphere
+  return $ if dot v normal > 0.0 then v else (-v)
 
 rayColor :: Hittable h => h -> Ray -> State (StdGen, Int) (V3 Double)
 rayColor h r = do
@@ -105,17 +146,17 @@ rayColor h r = do
   if depth <= 0
     then return (V3 0.0 0.0 0.0)
     else case hit h r 0.00001 infinity of
-      Just hrec -> rayHitColor h hrec
+      Just hrec -> rayHitColor h r hrec
       Nothing -> return $ backgroundColor r
 
-rayHitColor :: Hittable h => h -> HitRecord -> State (StdGen, Int) (V3 Double)
-rayHitColor h HitRecord{..} = do
+rayHitColor :: Hittable h => h -> Ray -> HitRecord -> State (StdGen, Int) (V3 Double)
+rayHitColor h r hrec@HitRecord{..} = do
   (g, depth) <- get
-  let (ru,newg) = runState randomInUnitSphere g
+  let (matrec, newg) = runState (hitMaterial r hrec) g
   put (newg, depth - 1)
-  let target = hitP + hitNormal + ru
-  color <- rayColor h (Ray { rayOrigin = hitP, rayDirection = target - hitP })
-  return $ pure 0.5 * color
+  case matrec of
+    Just MaterialRecord{..} -> (matAttenuation *) <$> rayColor h matScattered
+    Nothing -> pure 0.0
 
 backgroundColor :: Ray -> V3 Double
 backgroundColor r = let
@@ -178,7 +219,12 @@ main :: IO ()
 main = do
   gen <- getStdGen
   let pxs = [(i, j) | j <- [imageHeight-1, imageHeight-2 .. 0], i <- [0..imageWidth-1]]
-      world = [Sphere (V3 0.0 0.0 (-1.0)) 0.5, Sphere (V3 0.0 (-100.5) (-1.0)) 100]
+      world = [
+        Sphere (V3 0.0 0.0 (-1.0)) 0.5 (materialLambertian (V3 0.7 0.3 0.3)),
+        Sphere (V3 0.0 (-100.5) (-1.0)) 100 (materialLambertian (V3 0.8 0.8 0.0)),
+        Sphere (V3 1.0 0.0 (-1.0)) 0.5 (materialMetal (V3 0.8 0.6 0.2) 1.0),
+        Sphere (V3 (-1.0) 0.0 (-1.0)) 0.5 (materialMetal (V3 0.8 0.8 0.8) 0.3)
+        ]
       (rays, newgen) = flip runState gen $ mapM (backgroundRay camera) pxs
       colors = flip evalState newgen $ mapM (buildColor world) rays
   output colors imageWidth imageHeight
