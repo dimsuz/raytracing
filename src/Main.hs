@@ -8,7 +8,7 @@ import Data.List.Index (imapM_)
 import Control.Monad (when)
 import Control.Monad.Loops (iterateWhile)
 import Linear.V3
-import Linear.Metric (norm, normalize, dot)
+import Linear.Metric (norm, normalize, quadrance, dot)
 import Control.Applicative ((<|>))
 import Control.Monad.State
 import System.Random
@@ -16,7 +16,7 @@ import System.Random
 imageWidth = 400
 imageHeight = 200
 samplesPerPixel = 100
-maxDepth = 70
+maxDepth = 100
 
 maxNonInfiniteFloat :: RealFloat a => a -> a
 maxNonInfiniteFloat a = encodeFloat m n where
@@ -108,13 +108,43 @@ materialLambertian albedo ray HitRecord{..} = do
 materialMetal :: V3 Double -> Double -> Material
 materialMetal albedo fuzz Ray{..} HitRecord{..} = do
   v <- randomUnitVector
-  let reflect v n = v - pure (2 * dot v n) * n
-      reflected = reflect (normalize rayDirection) hitNormal
+  let reflected = reflect (normalize rayDirection) hitNormal
       direction = reflected + pure fuzz' * v
       fuzz' = if fuzz < 1 then fuzz else 1
       matScattered = Ray { rayOrigin = hitP, rayDirection = direction }
       matAttenuation = albedo
   return $ if dot direction hitNormal > 0 then Just MaterialRecord{..} else Nothing
+
+materialDielectric :: Double -> Material
+materialDielectric refIdx Ray{..} HitRecord{..} = do
+  randomDouble <- random'
+  let etaiOverEtat = if hitNormalIsFrontFace then 1.0 / refIdx else refIdx
+      unitDirection = normalize rayDirection
+      cosTheta = min (dot (-unitDirection) hitNormal) 1.0
+      sinTheta = sqrt (1.0 - cosTheta ^ 2)
+      matAttenuation = pure 1.0
+      matScattered = if etaiOverEtat * sinTheta <= 1.0
+        then if randomDouble < schlick cosTheta etaiOverEtat
+             then Ray { rayOrigin = hitP, rayDirection = reflect unitDirection hitNormal }
+             else Ray { rayOrigin = hitP, rayDirection = refract unitDirection hitNormal etaiOverEtat }
+        else Ray { rayOrigin = hitP, rayDirection = reflect unitDirection hitNormal }
+  return $ Just MaterialRecord{..}
+
+refract :: V3 Double -> V3 Double -> Double -> V3 Double
+refract uv n etaiOverEtat = let
+  cosTheta = dot (-uv) n
+  rOutParallel = pure etaiOverEtat * (uv + pure cosTheta * n)
+  rOutPerp = pure (sqrt (1.0 - quadrance rOutParallel)) * (-n)
+  in rOutParallel + rOutPerp
+
+reflect :: V3 Double -> V3 Double -> V3 Double
+reflect v n = v - pure (2 * dot v n) * n
+
+schlick :: Double -> Double -> Double
+schlick cosine refIdx = let
+  r0 = (1 - refIdx) / (1 + refIdx)
+  r0sq = r0 ^ 2
+  in r0sq + (1.0 - r0sq) * ((1.0 - cosine) ^ 5)
 
 rayAt :: Ray -> Double -> V3 Double
 rayAt r t = rayOrigin r + pure t * rayDirection r
@@ -220,10 +250,11 @@ main = do
   gen <- getStdGen
   let pxs = [(i, j) | j <- [imageHeight-1, imageHeight-2 .. 0], i <- [0..imageWidth-1]]
       world = [
-        Sphere (V3 0.0 0.0 (-1.0)) 0.5 (materialLambertian (V3 0.7 0.3 0.3)),
+        Sphere (V3 0.0 0.0 (-1.0)) 0.5 (materialLambertian (V3 0.1 0.2 0.5)),
         Sphere (V3 0.0 (-100.5) (-1.0)) 100 (materialLambertian (V3 0.8 0.8 0.0)),
-        Sphere (V3 1.0 0.0 (-1.0)) 0.5 (materialMetal (V3 0.8 0.6 0.2) 1.0),
-        Sphere (V3 (-1.0) 0.0 (-1.0)) 0.5 (materialMetal (V3 0.8 0.8 0.8) 0.3)
+        Sphere (V3 1.0 0.0 (-1.0)) 0.5 (materialMetal (V3 0.8 0.6 0.2) 0.3),
+        Sphere (V3 (-1.0) 0.0 (-1.0)) 0.5 (materialDielectric 1.5),
+        Sphere (V3 (-1.0) 0.0 (-1.0)) (-0.45) (materialDielectric 1.5)
         ]
       (rays, newgen) = flip runState gen $ mapM (backgroundRay camera) pxs
       colors = flip evalState newgen $ mapM (buildColor world) rays
