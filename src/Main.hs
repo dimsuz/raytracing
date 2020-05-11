@@ -18,9 +18,9 @@ imageWidth = 400
 
 imageHeight = 200
 
-samplesPerPixel = 100
+samplesPerPixel = 10
 
-maxDepth = 100
+maxDepth = 50
 
 maxNonInfiniteFloat :: RealFloat a => a -> a
 maxNonInfiniteFloat a = encodeFloat m n
@@ -34,7 +34,7 @@ maxNonInfiniteFloat a = encodeFloat m n
 infinity = maxNonInfiniteFloat 1
 
 clamp :: Double -> Double -> Double -> Double
-clamp x min max
+clamp min max x
   | x < min = min
   | x > max = max
   | otherwise = x
@@ -187,7 +187,7 @@ rayColor h r = do
   depth <- gets snd
   if depth <= 0
     then return (V3 0.0 0.0 0.0)
-    else case hit h r 0.00001 infinity of
+    else case hit h r 0.001 infinity of
       Just hrec -> rayHitColor h r hrec
       Nothing -> return $ backgroundColor r
 
@@ -220,8 +220,8 @@ output image w h = do
 sampledOutputColor :: Int -> V3 Double -> V3 Int
 sampledOutputColor samplesPerPixel rgb =
   let scale = 1.0 / fromIntegral samplesPerPixel
-      (V3 r g b) = sqrt <$> pure scale * rgb
-   in truncate <$> pure 256 * V3 (clamp r 0.0 0.999) (clamp g 0.0 0.999) (clamp b 0.0 0.999)
+      scaled = sqrt <$> pure scale * rgb
+   in truncate <$> (pure 256 * (clamp 0.0 0.9999 <$> scaled))
 
 printScanLineDebug :: Int -> Int -> Int -> IO ()
 printScanLineDebug w h index =
@@ -243,8 +243,8 @@ backgroundRay :: Camera -> (Int, Int) -> State StdGen [Ray]
 backgroundRay camera (i, j) = do
   rus <- if samplesPerPixel > 1 then randoms' samplesPerPixel else pure [0.0]
   rvs <- if samplesPerPixel > 1 then randoms' samplesPerPixel else pure [0.0]
-  let us = map (\ru -> (ru + fromIntegral i) / fromIntegral imageWidth) rus
-      vs = map (\rv -> (rv + fromIntegral j) / fromIntegral imageHeight) rvs
+  let us = map (\ru -> (ru + fromIntegral i) / fromIntegral (imageWidth - 1)) rus
+      vs = map (\rv -> (rv + fromIntegral j) / fromIntegral (imageHeight - 1)) rvs
   return $ zipWith (mkRay camera) us vs
 
 buildColor :: Hittable h => h -> [Ray] -> State StdGen (V3 Double)
@@ -265,7 +265,7 @@ camera =
 main :: IO ()
 main = do
   gen <- getStdGen
-  let pxs = [(i, j) | j <- [imageHeight -1, imageHeight -2 .. 0], i <- [0 .. imageWidth -1]]
+  let pxs = [(i, j) | j <- [(imageHeight - 1), (imageHeight - 2) .. 0], i <- [0 .. (imageWidth - 1)]]
       world =
         [ Sphere (V3 0.0 0.0 (-1.0)) 0.5 (materialLambertian (V3 0.1 0.2 0.5)),
           Sphere (V3 0.0 (-100.5) (-1.0)) 100 (materialLambertian (V3 0.8 0.8 0.0)),
