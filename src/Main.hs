@@ -7,16 +7,17 @@ module Main where
 import Control.Applicative ((<|>))
 import Control.Monad (when)
 import Control.Monad.Loops (iterateWhile)
-import Control.Monad.State
+import Control.Monad.State.Strict
 import Data.List.Index (imapM_)
+import Data.Maybe (catMaybes)
 import Linear.Metric (dot, norm, normalize, quadrance)
 import Linear.V3
 import System.IO (hPutStr, stderr)
 import System.Random
 
-imageWidth = 400
+imageWidth = 1200
 
-imageHeight = 200
+imageHeight = 800
 
 samplesPerPixel = 10
 
@@ -43,7 +44,11 @@ data Camera = Camera
   { cameraLowerLeftCorner :: V3 Double,
     cameraHorizontal :: V3 Double,
     cameraVertical :: V3 Double,
-    cameraOrigin :: V3 Double
+    cameraOrigin :: V3 Double,
+    cameraLensRadius :: Double,
+    cameraU :: V3 Double,
+    cameraV :: V3 Double,
+    cameraW :: V3 Double
   }
 
 data Ray = Ray
@@ -160,15 +165,20 @@ schlick cosine refIdx =
 rayAt :: Ray -> Double -> V3 Double
 rayAt r t = rayOrigin r + pure t * rayDirection r
 
-mkRay :: Camera -> Double -> Double -> Ray
-mkRay Camera {..} u v =
-  Ray
-    { rayOrigin = cameraOrigin,
-      rayDirection = cameraLowerLeftCorner + pure u * cameraHorizontal + pure v * cameraVertical - cameraOrigin
-    }
+mkRay :: Camera -> Double -> Double -> State StdGen Ray
+mkRay Camera {..} u v = do
+  g <- get
+  let (V3 rdx rdy _, newg) = runState ((pure cameraLensRadius *) <$> randomInUnitDisk) g
+      offset = cameraU * pure rdx + cameraV * pure rdy
+  put newg
+  return $
+    Ray
+      { rayOrigin = cameraOrigin + offset,
+        rayDirection = cameraLowerLeftCorner + pure u * cameraHorizontal + pure v * cameraVertical - cameraOrigin - offset
+      }
 
 randomInUnitSphere :: State StdGen (V3 Double)
-randomInUnitSphere = iterateWhile (\v -> norm v ^ 2 >= 1) $ randomR' (-1, 1)
+randomInUnitSphere = iterateWhile (\v -> quadrance v >= 1) $ randomR' (-1, 1)
 
 randomUnitVector :: State StdGen (V3 Double)
 randomUnitVector = do
@@ -181,6 +191,12 @@ randomInHemisphere :: V3 Double -> State StdGen (V3 Double)
 randomInHemisphere normal = do
   v <- randomInUnitSphere
   return $ if dot v normal > 0.0 then v else (- v)
+
+randomInUnitDisk :: State StdGen (V3 Double)
+randomInUnitDisk = iterateWhile (\v -> quadrance v >= 1.0) $ do
+  x <- randomR' (-1.0, 1.0)
+  y <- randomR' (-1.0, 1.0)
+  return (V3 x y 0.0)
 
 rayColor :: Hittable h => h -> Ray -> State (StdGen, Int) (V3 Double)
 rayColor h r = do
@@ -245,7 +261,7 @@ backgroundRay camera (i, j) = do
   rvs <- if samplesPerPixel > 1 then randoms' samplesPerPixel else pure [0.0]
   let us = map (\ru -> (ru + fromIntegral i) / fromIntegral (imageWidth - 1)) rus
       vs = map (\rv -> (rv + fromIntegral j) / fromIntegral (imageHeight - 1)) rvs
-  return $ zipWith (mkRay camera) us vs
+  zipWithM (mkRay camera) us vs
 
 buildColor :: Hittable h => h -> [Ray] -> State StdGen (V3 Double)
 buildColor h rs = do
@@ -254,25 +270,87 @@ buildColor h rs = do
   put newg
   return (sum colors)
 
-camera =
-  Camera
-    { cameraLowerLeftCorner = V3 (-2.0) (-1.0) (-1.0),
-      cameraHorizontal = V3 4.0 0.0 0.0,
-      cameraVertical = V3 0.0 2.0 0.0,
-      cameraOrigin = V3 0.0 0.0 0.0
-    }
+camera :: V3 Double -> V3 Double -> V3 Double -> Double -> Double -> Double -> Double -> Camera
+camera lookFrom lookAt vUp vfov aspectRatio aperture focusDist =
+  let theta = vfov * (pi / 180.0)
+      halfHeight = tan (theta / 2)
+      halfWidth = aspectRatio * halfHeight
+      w = normalize (lookFrom - lookAt)
+      u = normalize (cross vUp w)
+      v = cross w u
+   in Camera
+        { cameraLowerLeftCorner = lookFrom - pure (halfWidth * focusDist) * u - pure (halfHeight * focusDist) * v - pure focusDist * w,
+          cameraHorizontal = pure (2 * halfWidth * focusDist) * u,
+          cameraVertical = pure (2 * halfHeight * focusDist) * v,
+          cameraOrigin = lookFrom,
+          cameraLensRadius = aperture / 2,
+          cameraU = u,
+          cameraW = w,
+          cameraV = v
+        }
 
-main :: IO ()
-main = do
-  gen <- getStdGen
-  let pxs = [(i, j) | j <- [(imageHeight - 1), (imageHeight - 2) .. 0], i <- [0 .. (imageWidth - 1)]]
-      world =
+simpleWorld :: ([Sphere], Camera)
+simpleWorld =
+  let world =
         [ Sphere (V3 0.0 0.0 (-1.0)) 0.5 (materialLambertian (V3 0.1 0.2 0.5)),
           Sphere (V3 0.0 (-100.5) (-1.0)) 100 (materialLambertian (V3 0.8 0.8 0.0)),
           Sphere (V3 1.0 0.0 (-1.0)) 0.5 (materialMetal (V3 0.8 0.6 0.2) 0.3),
           Sphere (V3 (-1.0) 0.0 (-1.0)) 0.5 (materialDielectric 1.5),
           Sphere (V3 (-1.0) 0.0 (-1.0)) (-0.45) (materialDielectric 1.5)
         ]
-      (rays, newgen) = flip runState gen $ mapM (backgroundRay camera) pxs
-      colors = flip evalState newgen $ mapM (buildColor world) rays
+      lookFrom = V3 3 3 2
+      lookAt = V3 0.0 0.0 (-1.0)
+      distToFocus = norm (lookFrom - lookAt)
+      aperture = 2.0
+      cam = camera lookFrom lookAt (V3 0.0 1.0 0.0) 20 (fromIntegral imageWidth / fromIntegral imageHeight) aperture distToFocus
+   in (world, cam)
+
+randomMaterial :: Double -> State StdGen Material
+randomMaterial chooseMat
+  | chooseMat < 0.8 = do
+    rv1 <- random'
+    rv2 <- random'
+    return $ materialLambertian (rv1 * rv2)
+  | chooseMat < 0.95 = do
+    albedo <- randomR' (0.5, 1.0)
+    fuzz <- randomR' (0, 0.5)
+    return $ materialMetal albedo fuzz
+  | otherwise = return $ materialDielectric 1.5
+
+randomSphere :: (Int, Int) -> State StdGen (Maybe Sphere)
+randomSphere (a, b) = do
+  randomCx <- random'
+  randomCz <- random'
+  let sphereCenter = V3 (fromIntegral a + 0.9 * randomCx) 0.2 (fromIntegral b + 0.9 * randomCz)
+  if norm (sphereCenter - V3 4.0 0.2 0.0) <= 0.9
+    then return Nothing
+    else do
+      chooseMat <- random'
+      sphereMaterial <- randomMaterial chooseMat
+      let sphereRadius = 0.2
+      return $ Just (Sphere {..})
+
+randomWorld :: State StdGen ([Sphere], Camera)
+randomWorld = do
+  let base = Sphere (V3 0 (-1000) 0) 1000 (materialLambertian $ pure 0.5)
+      bigGlass = Sphere (V3 0 1 0) 1.0 (materialDielectric 1.5)
+      bigLamb = Sphere (V3 (-4) 1 0) 1.0 (materialLambertian $ V3 0.4 0.2 0.1)
+      bigMetal = Sphere (V3 4 1 0) 1.0 (materialMetal (V3 0.7 0.6 0.5) 0.0)
+      lookFrom = V3 13 2 3
+      lookAt = V3 0.0 0.0 0.0
+      distToFocus = 10
+      aperture = 0.1
+      cam = camera lookFrom lookAt (V3 0 1 0) 20 (fromIntegral imageWidth / fromIntegral imageHeight) aperture distToFocus
+      abs = [(a, b) | a <- [(-11) .. 11], b <- [(-11) .. 11]]
+      spheres :: State StdGen [Sphere]
+      spheres = catMaybes <$> mapM randomSphere abs
+  (\ss -> (base : ss ++ [bigGlass, bigLamb, bigMetal], cam)) <$> spheres
+
+main :: IO ()
+main = do
+  gen <- getStdGen
+  let pxs = [(i, j) | j <- [(imageHeight - 1), (imageHeight - 2) .. 0], i <- [0 .. (imageWidth - 1)]]
+      ((world, cam), g1) = runState randomWorld gen
+      (rays, g2) = flip runState g1 $ mapM (backgroundRay cam) pxs
+      colors = flip evalState g2 $ mapM (buildColor world) rays
   output colors imageWidth imageHeight
